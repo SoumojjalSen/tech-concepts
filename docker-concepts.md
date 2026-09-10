@@ -893,3 +893,128 @@ jobs:
 Push to the infra repo → GitHub Actions SSHs into the VM → pulls latest images → restarts services. Secrets (SSH key, host IP) stored in GitHub repo settings, never in code.
 
 `docker-compose down --remove-orphans || true` — stops/removes old containers before starting new ones. `|| true` ignores errors on first run when no containers exist yet.
+
+## docker-compose exec vs run
+
+| | `exec` | `run` |
+|---|--------|-------|
+| Target | Already-running container | Creates a new temporary container |
+| Use case | One-off command inside a live service | Run setup/migration before service starts |
+| State | Changes persist in the running container | With `--rm`, container and its writes are deleted on exit |
+| Example | `docker-compose exec cliproxyapi ./CLIProxyAPI -claude-login` | `docker-compose run --rm cliproxyapi sh -c "cat > /CLIProxyAPI/config.yaml ..."` |
+
+Key difference for auth tokens: if you save credentials via `run --rm`, the temporary container is deleted and the tokens vanish. Use `exec` to write into the running container, or mount a volume so the directory persists regardless.
+
+```bash
+# exec — runs inside the live container
+docker-compose exec ai-toolbox npx -y mcp-remote@0.1.38 https://mcp.groww.in/mcp 52155
+
+# run — creates a fresh container, removes it after
+docker-compose run --rm cliproxyapi ./CLIProxyAPI -claude-login
+```
+
+## docker cp
+
+Copies files between the host and a container.
+
+```bash
+# Host → Container
+docker cp ~/.mcp-auth/. ai-toolbox:/root/.mcp-auth/
+
+# Container → Host
+docker cp ai-toolbox:/root/.mcp-auth/. ~/backup-mcp-auth/
+```
+
+The trailing `/.` copies the **contents** of the directory, not the directory itself. Useful for seeding a volume or extracting files for debugging.
+
+## OAuth token persistence in Docker
+
+Tokens saved inside a container are **ephemeral** — lost on container restart, removal, or image update. Mount the token directory to a named volume to persist them.
+
+**Common pitfall:** the volume is mounted at the wrong path. The app may store config and auth in different directories:
+
+```text
+CLIProxyAPI example:
+  /CLIProxyAPI/config.yaml        ← config (port, api_key)
+  /root/.cli-proxy-api/auth.json  ← OAuth tokens (Claude login)
+
+These are different directories. A volume at /CLIProxyAPI/ does NOT capture /root/.cli-proxy-api/.
+```
+
+Fix: mount a separate volume for each:
+
+```yaml
+volumes:
+  - cliproxyapi_data:/CLIProxyAPI           # config
+  - cliproxyapi_auth:/root/.cli-proxy-api   # Claude OAuth tokens
+  - mcp_auth:/root/.mcp-auth               # Groww/Kite OAuth tokens (mcp-remote)
+```
+
+After mounting, authenticate **once** — the volume persists the tokens across all future restarts and deploys.
+
+To auth inside a volume-mounted container (so tokens land in the volume, not on the host):
+
+```bash
+# Option A: exec into running container
+docker-compose exec ai-toolbox npx -y mcp-remote@0.1.38 https://mcp.groww.in/mcp 52155
+
+# Option B: temporary container with same volume
+docker run --rm -it --network host -v app-server_mcp_auth:/root/.mcp-auth node:20-alpine \
+  npx -y mcp-remote@0.1.38 https://mcp.groww.in/mcp 52155
+```
+
+## Google Cloud OAuth setup for Gmail
+
+Needed when n8n (or any app) sends email via Gmail API. Free, no credit card.
+
+**Steps:**
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) → create a project
+2. **APIs & Services** → **Library** → search **Gmail API** → **Enable**
+3. **APIs & Services** → **OAuth consent screen** → fill app name, support email, developer email → **Save**
+4. The app starts in **Testing** mode — only users you add as "test users" can authorize. No Google verification needed for personal use.
+5. **OAuth consent screen** → **Audience** → **Add users** → add your Gmail address
+6. **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth Client ID**
+7. Application type: **Web application**
+8. Authorized redirect URI: `http://localhost:5678/rest/oauth2-credential/callback` (for n8n)
+9. Copy **Client ID** and **Client Secret** into n8n's Gmail credential page
+
+| Field | Value |
+|-------|-------|
+| Testing mode | Only added test users can authorize; no review process |
+| Production mode | Anyone can authorize; requires Google verification (days/weeks) |
+| Redirect URI | Must match exactly what the consuming app expects |
+| Cost | Free — OAuth credentials and Gmail API have no charge |
+| Projects limit | 25 per free Google account |
+
+## n8n API
+
+n8n exposes a REST API for managing workflows programmatically.
+
+**Authentication:** Generate an API key in n8n UI → **Settings** → **API** → **Create API Key**. Pass it as a header:
+
+```bash
+curl -s http://localhost:5678/api/v1/workflows \
+  -H "X-N8N-API-KEY: <your-key>"
+```
+
+**Common operations:**
+
+```bash
+# List workflows
+curl -s http://localhost:5678/api/v1/workflows -H "X-N8N-API-KEY: $KEY"
+
+# Create a workflow
+curl -s -X POST http://localhost:5678/api/v1/workflows \
+  -H "X-N8N-API-KEY: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Workflow", "nodes": [...], "connections": {...}, "settings": {}}'
+
+# Update a workflow (strip read-only fields first)
+curl -s -X PUT http://localhost:5678/api/v1/workflows/<id> \
+  -H "X-N8N-API-KEY: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "...", "nodes": [...], "connections": {...}, "settings": {}}'
+```
+
+**Read-only fields** that must be removed from PUT requests: `id`, `active`, `createdAt`, `updatedAt`, `versionId`, `activeVersionId`, `isArchived`, `triggerCount`. Sending them returns `400 request/body/<field> is read-only`.
