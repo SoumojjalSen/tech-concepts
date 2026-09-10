@@ -668,6 +668,34 @@ ssh -i ~/.ssh/key -L 5678:localhost:5678 -L 3000:localhost:3000 -N -f user@vm-ip
 
 Multiple `-L` flags forward multiple ports in one command. Without tunnels, services on the VM aren't reachable from your laptop (ports aren't open to internet). Once you set up a reverse proxy (Caddy/nginx) with a public domain, tunnels become unnecessary.
 
+`-L` stands for **Local** port forwarding. There's also `-R` (Remote) which does the reverse — forwards a remote port to your local machine.
+
+### Managing tunnels
+
+```bash
+# List running tunnels
+ps aux | grep "ssh.*-L.*oracle_key" | grep -v grep
+
+# Kill a specific tunnel by PID
+kill <PID>
+
+# Kill all tunnels using oracle_key
+pkill -f "ssh.*-L.*oracle_key"
+
+# Check what's using a port
+lsof -i :5678
+```
+
+### SSH multiplexing
+
+When you already have an SSH session open to the VM and start a tunnel, SSH detects "I already have a connection to this server" and tries to reuse it. If it can't, it shows:
+
+```
+ControlSocket ... already exists, disabling multiplexing
+```
+
+This is not an error — it just opened a separate connection. The tunnel works fine either way. Multiplexing is SSH being efficient by sharing connections.
+
 ## Docker Compose
 
 Docker Compose runs **multiple containers** from a single config file. Instead of writing separate `docker run` commands for each service, you define everything in `docker-compose.yml`.
