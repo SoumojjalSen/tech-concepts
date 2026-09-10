@@ -370,6 +370,122 @@ docker compose ps              # list running services
 
 `depends_on` controls startup order (temporal starts before smc) but does not wait for temporal to be healthy — use `depends_on.condition: service_healthy` with a healthcheck for that.
 
+## Container Registries (Pull / Push)
+
+A **registry** is where Docker images are stored and distributed. Like GitHub for code, but for Docker images.
+
+| Registry | URL format | Free? |
+|----------|-----------|-------|
+| Docker Hub | `docker.io/username/image` | Yes (public repos) |
+| GitHub Container Registry | `ghcr.io/username/image` | Yes (public repos) |
+| Oracle OCIR | `region.ocir.io/namespace/image` | Yes (Oracle free tier) |
+| AWS ECR | `account.dkr.ecr.region.amazonaws.com/image` | Paid |
+
+### Pushing an image
+
+```bash
+# 1. Build the image
+docker build -t ghcr.io/soumojjalsen/flowpilot:latest .
+
+# 2. Log in to the registry
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+
+# 3. Push
+docker push ghcr.io/soumojjalsen/flowpilot:latest
+```
+
+### Pulling an image
+
+```bash
+# Pull from registry → saves locally
+docker pull ghcr.io/soumojjalsen/flowpilot:latest
+
+# Run it (auto-pulls if not found locally)
+docker run ghcr.io/soumojjalsen/flowpilot:latest
+```
+
+### Tags
+
+Tags version your images. Common patterns:
+
+```bash
+ghcr.io/user/app:latest      # floating — always points to newest
+ghcr.io/user/app:v1.2.3      # semver — pinned release
+ghcr.io/user/app:abc123def   # git commit SHA — exact build
+```
+
+`latest` is convenient but dangerous in production — it changes under you. Pin to a SHA or version for reproducibility.
+
+### CI/CD: GitHub Actions → Registry
+
+```
+Push to main → GitHub Actions builds image → pushes to ghcr.io
+                                                    │
+Your VM: docker pull ghcr.io/user/app:latest ←──────┘
+                                                    │
+                                              runs the container
+```
+
+`GITHUB_TOKEN` is provided automatically in GitHub Actions — no extra secrets to configure for ghcr.io.
+
+## Multi-Arch Builds
+
+Your Mac has an Apple Silicon (ARM) chip. Your Oracle VM has an ARM CPU. But CI runners are x86 (amd64). A multi-arch image works on all of them.
+
+```bash
+# Build for both architectures
+docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/user/app:latest --push .
+```
+
+Docker automatically pulls the right architecture when you `docker pull`. The image manifest contains both variants — one binary, works everywhere.
+
+In GitHub Actions, `docker/setup-qemu-action` enables cross-platform builds (emulates ARM on the x86 CI runner).
+
+## Environment Variables and Secrets
+
+Three ways to pass env vars to a container:
+
+```bash
+# 1. Inline (visible in shell history + docker inspect)
+docker run -e API_KEY=secret123 myapp
+
+# 2. From host environment (better — not in command)
+export API_KEY=secret123
+docker run -e API_KEY myapp
+
+# 3. From .env file (best — secrets in a file with chmod 600)
+docker run --env-file .env myapp
+```
+
+`.env` file format:
+```
+API_KEY=secret123
+DATABASE_URL=postgres://localhost/mydb
+PORT=3000
+```
+
+Always use `--env-file` for secrets. Never `-e` with the value inline.
+
+## Restart Policies
+
+What happens when a container crashes or the host reboots:
+
+| Policy | Behavior |
+|--------|----------|
+| `no` (default) | Container stays stopped |
+| `always` | Always restart — on crash, on reboot, even if manually stopped then host reboots |
+| `unless-stopped` | Like `always` but respects manual `docker stop` |
+| `on-failure` | Restart only on non-zero exit code, not on reboot |
+
+```bash
+docker run --restart always myapp    # survives crashes + reboots
+docker run --restart unless-stopped myapp  # survives crashes + reboots, respects manual stop
+```
+
+For server deployments (CLIProxyAPI, FlowPilot, n8n), use `--restart always` or `unless-stopped`.
+
+---
+
 ## Image size and security
 
 Smaller images are faster to pull, faster to deploy, and have fewer packages that could contain vulnerabilities.
