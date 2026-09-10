@@ -484,6 +484,116 @@ docker run --restart unless-stopped myapp  # survives crashes + reboots, respect
 
 For server deployments (CLIProxyAPI, FlowPilot, n8n), use `--restart always` or `unless-stopped`.
 
+## Real-World Docker Session (FlowPilot + Oracle VM)
+
+A complete Docker session for deploying services on an Oracle ARM VM:
+
+### Installing Docker on a fresh VM
+
+```bash
+sudo apt update && sudo apt install -y docker.io
+sudo usermod -aG docker ubuntu    # add user to docker group (needs re-login)
+sudo docker run --rm hello-world  # verify it works (--rm cleans up after)
+```
+
+### Pulling and running a third-party service
+
+```bash
+# Pull image from Docker Hub
+sudo docker pull eceasy/cli-proxy-api:latest
+
+# Run it as a background service
+sudo docker run -d --name cliproxyapi --restart always \
+  -p 8317:8317 \
+  -v ~/app/cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml \
+  -v ~/app/cliproxyapi/auths:/root/.cli-proxy-api \
+  eceasy/cli-proxy-api:latest
+```
+
+Breakdown of this command:
+- `-d` → background
+- `--name cliproxyapi` → name for `docker stop/logs/exec`
+- `--restart always` → survives crashes + reboots
+- `-p 8317:8317` → expose port
+- `-v host:container` → mount config file and auth directory from VM into container
+- Last arg is the image
+
+### Inspecting a running container
+
+```bash
+sudo docker logs cliproxyapi              # view output
+sudo docker logs cliproxyapi | grep "client"  # filter logs
+sudo docker restart cliproxyapi           # restart (picks up new config)
+sudo docker exec -it cliproxyapi /bin/sh  # open shell inside container
+```
+
+### Running your own app from GitHub Container Registry
+
+```bash
+# Pull from ghcr.io (built by GitHub Actions CI)
+sudo docker pull ghcr.io/soumojjalsen/flowpilot:latest
+
+# Run with secrets from .env file
+sudo docker run -d --name flowpilot --restart always \
+  -p 3000:3000 \
+  --env-file ~/app/flowpilot/.env \
+  ghcr.io/soumojjalsen/flowpilot:latest
+```
+
+### Running n8n (workflow automation)
+
+```bash
+docker run -d --name n8n \
+  -p 5678:5678 \
+  -v n8n_data:/home/node/.n8n \
+  n8nio/n8n
+```
+
+`-v n8n_data:/home/node/.n8n` is a **named volume** — n8n stores workflows and credentials there. Survives `docker stop/rm`. Without it, deleting the container loses all workflows.
+
+### Interactive auth inside a container
+
+```bash
+# Open shell inside running container
+sudo docker exec -it cliproxyapi /bin/sh
+
+# Inside the container, run the OAuth login
+/CLIProxyAPI/CLIProxyAPI -claude-login -no-browser
+# Prints a URL → open in browser → paste code back
+```
+
+`docker exec` runs a command in an already-running container. `-it` makes it interactive (you can type). Without `-it`, one-off commands work too:
+
+```bash
+sudo docker exec cliproxyapi ls /CLIProxyAPI/   # non-interactive, just prints output
+```
+
+### Complete flag reference
+
+| Flag | Meaning |
+|------|---------|
+| `run` | Create + start a new container |
+| `-d` | Detached (background) |
+| `--name X` | Name the container |
+| `--restart always` | Auto-restart on crash or VM reboot |
+| `-p host:container` | Map a port |
+| `-v host:container` | Mount a file or directory |
+| `-v name:container` | Named volume (Docker manages storage location) |
+| `--rm` | Delete container when it stops (for one-off tests) |
+| `--env-file .env` | Load env vars from file |
+| `-e KEY=VAL` | Set one env var inline |
+| `-it` | Interactive + allocate TTY (for shells) |
+| `pull` | Download image from registry |
+| `logs` | View container stdout/stderr |
+| `logs -f` | Follow logs in real time |
+| `restart` | Stop + start a container |
+| `exec` | Run command inside running container |
+| `stop` | Send SIGTERM, then SIGKILL after timeout |
+| `rm` | Remove a stopped container |
+| `rmi` | Remove an image |
+| `ps` | List running containers |
+| `ps -a` | List all containers (including stopped) |
+
 ---
 
 ## Image size and security
