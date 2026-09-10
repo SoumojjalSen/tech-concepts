@@ -640,3 +640,228 @@ docker stop  →  SIGTERM  →  tini (PID 1)  →  node (PID 2)
 ```
 
 If the process does not exit within the stop timeout (default 10 seconds, configurable with `-t`), Docker sends SIGKILL — an immediate, non-catchable kill. This is why `shutdownGraceTime` on the Temporal worker (20s) should be less than or equal to the `docker stop` timeout, and the Kubernetes `terminationGracePeriodSeconds` should accommodate both the drain time and any cleanup after it.
+
+## SSH tunnels and port forwarding
+
+**Port forwarding** = "when I hit port X on my machine, send the traffic to port Y on a remote server."
+**SSH tunnel** = the encrypted pipe that carries that traffic. They're the same thing in practice.
+
+```text
+Your Mac                          Remote VM
+┌──────────┐     SSH tunnel      ┌──────────┐
+│ :5678 ───┼────encrypted────────┼─→ :5678  │ (n8n)
+│ :3000 ───┼────encrypted────────┼─→ :3000  │ (ai-toolbox)
+│ :8317 ───┼────encrypted────────┼─→ :8317  │ (CLIProxyAPI)
+└──────────┘     (internet)      └──────────┘
+```
+
+```bash
+ssh -i ~/.ssh/key -L 5678:localhost:5678 -L 3000:localhost:3000 -N -f user@vm-ip
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-i ~/.ssh/key` | Private key for auth |
+| `-L 5678:localhost:5678` | Forward local port 5678 → remote localhost:5678 |
+| `-N` | Don't open a shell — just keep tunnels open |
+| `-f` | Run in background |
+
+Multiple `-L` flags forward multiple ports in one command. Without tunnels, services on the VM aren't reachable from your laptop (ports aren't open to internet). Once you set up a reverse proxy (Caddy/nginx) with a public domain, tunnels become unnecessary.
+
+## Docker Compose
+
+Docker Compose runs **multiple containers** from a single config file. Instead of writing separate `docker run` commands for each service, you define everything in `docker-compose.yml`.
+
+### Without compose (manual)
+
+```bash
+docker run -d --name cliproxyapi --network host eceasy/cli-proxy-api:latest
+docker run -d --name ai-toolbox --network host --env-file /etc/ai-toolbox/.env ghcr.io/soumojjalsen/ai-toolbox:latest
+docker run -d --name n8n --network host -v n8n_data:/home/node/.n8n n8nio/n8n
+```
+
+### With compose (one command)
+
+```yaml
+name: app-server
+
+services:
+  cliproxyapi:
+    image: eceasy/cli-proxy-api:latest
+    container_name: cliproxyapi
+    network_mode: host
+    volumes:
+      - cliproxyapi_data:/CLIProxyAPI
+    restart: unless-stopped
+
+  ai-toolbox:
+    image: ghcr.io/soumojjalsen/ai-toolbox:latest
+    container_name: ai-toolbox
+    network_mode: host
+    env_file: /etc/ai-toolbox/.env
+    restart: unless-stopped
+    depends_on:
+      - cliproxyapi
+
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    network_mode: host
+    volumes:
+      - n8n_data:/home/node/.n8n
+    restart: unless-stopped
+
+volumes:
+  n8n_data:
+  cliproxyapi_data:
+```
+
+```bash
+docker-compose up -d       # start all
+docker-compose ps          # status
+docker-compose logs n8n    # logs for one service
+docker-compose down        # stop and remove all
+docker-compose up -d n8n   # start only one service
+docker-compose pull        # pull latest images
+```
+
+### Key fields
+
+| Field | Meaning |
+|-------|---------|
+| `name` | Project name — prefixed to container/volume names |
+| `image` | Docker image to pull and run |
+| `container_name` | Explicit container name (otherwise compose auto-generates one) |
+| `network_mode: host` | Container shares the host's network — no port mapping needed, all services reach each other via localhost |
+| `env_file` | Load environment variables from a file |
+| `depends_on` | Start this service after the listed service. Controls startup order only, not "wait until healthy" |
+| `volumes` | Mount persistent storage (see Volumes section below) |
+| `restart: unless-stopped` | Auto-restart on crash or VM reboot, unless manually stopped |
+
+### `docker compose` (space) vs `docker-compose` (hyphen)
+
+- `docker compose` = plugin, installed via `docker-compose-plugin` package
+- `docker-compose` = standalone binary, installed separately
+
+Same functionality, different install method. Use whichever is installed.
+
+## Volumes
+
+A container's filesystem is **temporary** — `docker rm` deletes everything inside. A **volume** is permanent storage on the host disk that survives container removal.
+
+```yaml
+volumes:
+  - cliproxyapi_data:/CLIProxyAPI
+#   ↑ volume name      ↑ path inside container
+```
+
+**Left side** = named volume on the host disk (persistent).
+**Right side** = folder inside the container where it's mounted.
+
+Everything written to `/CLIProxyAPI/` inside the container is actually saved in the volume. Next container that mounts the same volume sees the same files.
+
+### Analogy: USB drive
+
+```text
+Without volume:
+  Container writes to /data → container removed → data gone
+
+With volume:
+  Container writes to /data → saved to USB (volume)
+  Container removed → USB still has the data
+  New container mounts USB at /data → data is back
+```
+
+### Where volumes live on disk
+
+```bash
+docker volume ls                              # list all volumes
+docker volume inspect cliproxyapi_data        # see physical path
+# Usually: /var/lib/docker/volumes/<name>/_data/
+```
+
+### Volume naming with compose
+
+Compose prefixes volume names with the project name:
+
+```
+docker-compose.yml: name: app-server, volume: n8n_data
+Actual volume name: app-server_n8n_data
+```
+
+### Declaring volumes
+
+Volumes must be declared at the bottom of the compose file:
+
+```yaml
+volumes:
+  n8n_data:           # declares the volume
+  cliproxyapi_data:   # declares the volume
+```
+
+Without declaration, compose treats the left side as a host directory path instead of a named volume.
+
+## docker-compose run
+
+`docker-compose run` creates a **one-off** container from a service to run a specific command, instead of the default startup command.
+
+```bash
+docker-compose run --rm cliproxyapi ./CLIProxyAPI -claude-login
+```
+
+| Part | Meaning |
+|------|---------|
+| `run` | One-off container, not a long-running service |
+| `--rm` | Remove the container when it exits (cleanup) |
+| `cliproxyapi` | Service name from the compose file |
+| `./CLIProxyAPI -claude-login` | Override the default command |
+
+The container gets the same image, volumes, and network as the service definition. So files written during `run` (like `config.yaml` in a volume) are available when the service starts normally with `up -d`.
+
+## Infra repo pattern
+
+Industry standard: separate "what the app does" from "how it runs."
+
+| Repo | Contains | Purpose |
+|------|----------|---------|
+| App repo (e.g. `ai-toolbox`) | Source code, Dockerfile, CI workflow | How to **build** the image |
+| Infra repo (e.g. `server-config`) | docker-compose.yml, Caddyfile, deploy workflow | How to **run** the images |
+
+The app repo owns its Dockerfile. The infra repo owns the compose/K8s manifests. This mirrors GitOps tools like ArgoCD where deployment config is always in a separate repo from app code.
+
+## Env files in production
+
+| Location | Purpose |
+|----------|---------|
+| `.env` in project root | Local dev — loaded by `node --env-file=.env` or `docker-compose` |
+| `.env.example` in repo | Committed — documents required vars with placeholder values |
+| `/etc/<service>/.env` on server | Production — `chmod 600` for security, referenced by compose `env_file:` |
+
+Docker compose loads env files via `env_file:` field. Multiple `--env-file` flags in `docker run` merge values (later file wins on duplicates).
+
+## Auto-deploy with GitHub Actions
+
+```yaml
+name: Deploy to VM
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ~/apps/server-config
+            docker-compose down --remove-orphans || true
+            docker-compose pull
+            docker-compose up -d
+```
+
+Push to the infra repo → GitHub Actions SSHs into the VM → pulls latest images → restarts services. Secrets (SSH key, host IP) stored in GitHub repo settings, never in code.
+
+`docker-compose down --remove-orphans || true` — stops/removes old containers before starting new ones. `|| true` ignores errors on first run when no containers exist yet.
