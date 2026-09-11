@@ -386,7 +386,14 @@ In Oracle's Security List, **ingress rules** define what incoming traffic is all
 |-------|---------|---------|
 | **Source CIDR** | Who can send traffic | `0.0.0.0/0` = everyone, `49.36.120.5/32` = one IP |
 | **Protocol** | TCP, UDP, or ICMP | TCP for web/SSH |
-| **Destination Port** | Which port on your server | 80 (HTTP), 443 (HTTPS), 22 (SSH) |
+| **Source Port Range** | The port on the sender's machine | Leave empty (allow all) — browsers pick a random port (e.g. 52431) to send from, you can't predict it |
+| **Destination Port Range** | The port on your server that traffic is going to | 80 (HTTP), 443 (HTTPS), 22 (SSH) |
+
+```
+User's browser (source port: 52431) → Your server (destination port: 80)
+                 ↑ random, unknown          ↑ fixed, you control this
+                 leave empty                 set to 80
+```
 
 A rule reads as: "Allow traffic FROM [source] TO [port] using [protocol]."
 
