@@ -459,6 +459,109 @@ Both are needed because: user types `http://myserver.com` (port 80) → Caddy re
 
 ---
 
+## Reverse Proxy
+
+A server that sits in front of your apps, receives all incoming traffic, and routes it to the right service based on the URL path. Without it, you'd expose each service on a separate port and remember which is which.
+
+```
+Without reverse proxy:
+  http://140.238.229.137:3000  → ai-toolbox
+  http://140.238.229.137:5678  → n8n
+  http://140.238.229.137:8317  → CLIProxyAPI
+  (3 ports to open, 3 URLs to remember)
+
+With reverse proxy (Caddy on port 80):
+  http://140.238.229.137/api/      → ai-toolbox (:3000)
+  http://140.238.229.137/workflow/  → n8n (:5678)
+  (1 port, clean paths, internal services hidden)
+```
+
+Benefits:
+- **One port** exposed to the internet (80/443) instead of many
+- **Path-based routing** — clean URLs instead of port numbers
+- **HTTPS** — Caddy auto-generates TLS certificates when you add a domain
+- **Security** — internal services (CLIProxyAPI :8317) stay unexposed
+
+### Caddy
+
+A web server / reverse proxy. Simpler than nginx — config is a few lines. Auto-HTTPS with domains.
+
+```
+# Caddyfile — routing config
+:80 {
+    handle /api/* {
+        uri strip_prefix /api
+        reverse_proxy localhost:3000
+    }
+
+    handle /workflow/* {
+        uri strip_prefix /workflow
+        reverse_proxy localhost:5678
+    }
+}
+```
+
+| Directive | Meaning |
+|-----------|---------|
+| `:80` | Listen on port 80 |
+| `handle /api/*` | Match URLs starting with /api/ |
+| `uri strip_prefix /api` | Remove /api from the path before forwarding (so /api/health → /health) |
+| `reverse_proxy localhost:3000` | Forward the request to ai-toolbox |
+
+### Full traffic flow
+
+```
+User's browser: http://140.238.229.137/api/health
+      │
+      ▼
+Oracle Security List: port 80 allowed? → Yes
+      │
+      ▼
+iptables: port 80 allowed? → Yes
+      │
+      ▼
+Caddy (:80): path is /api/health → strip /api → forward to localhost:3000/health
+      │
+      ▼
+ai-toolbox (:3000): responds with {"status":"ok"}
+      │
+      ▼ (back through Caddy)
+User sees: {"status":"ok"}
+```
+
+### Opening port 80 — step by step
+
+**1. Oracle Security List (OCI Console):**
+- Networking → Virtual Cloud Networks → your VCN → Subnets → click subnet → Security Lists
+- Add two Ingress Rules:
+  - Source CIDR: `0.0.0.0/0`, Protocol: TCP, Destination Port: `80` (HTTP)
+  - Source CIDR: `0.0.0.0/0`, Protocol: TCP, Destination Port: `443` (HTTPS)
+
+**2. iptables (on the VM via SSH):**
+
+```bash
+sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+| Part | Meaning |
+|------|---------|
+| `sudo` | Run as root |
+| `iptables` | Linux firewall command |
+| `-I INPUT` | Insert rule at the top of the INPUT chain (incoming traffic) |
+| `-p tcp` | Match TCP protocol |
+| `--dport 80` | Match traffic to port 80 (HTTP) |
+| `--dport 443` | Match traffic to port 443 (HTTPS) |
+| `-j ACCEPT` | Allow this traffic |
+| `netfilter-persistent save` | Save to disk so rules survive reboot |
+
+Open both ports even if you only use 80 today — when you add a domain later, Caddy auto-enables HTTPS on 443 without any firewall changes.
+
+Both steps are required — Security List is the cloud firewall, iptables is the OS firewall. Missing either = traffic blocked.
+
+---
+
 ## Save as Stack
 
 When creating an instance, "Save as Stack" exports your configuration as a **Terraform template** in Oracle's Resource Manager. Useful for:
