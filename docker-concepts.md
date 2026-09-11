@@ -829,6 +829,68 @@ volumes:
 
 Without declaration, compose treats the left side as a host directory path instead of a named volume.
 
+### Host file mount vs named volume
+
+Two types of volume mounts in compose:
+
+```yaml
+volumes:
+  - ./Caddyfile:/etc/caddy/Caddyfile   # host file mount
+  - caddy_data:/data                     # named volume
+```
+
+| Type | Syntax | How it works | Use case |
+|------|--------|-------------|----------|
+| **Host file mount** | Starts with `./` or `/` | Maps a specific file/folder from the host to the container. You edit on host, container sees the change. | Config files you want to version control (Caddyfile, nginx.conf) |
+| **Named volume** | Just a name (no path prefix) | Docker manages the storage. Persists across container removal. You don't edit files in it directly. | Data that the app generates (databases, auth tokens, certificates) |
+
+Host file mounts require the file to exist on the host **before** the container starts. Named volumes are created automatically by Docker.
+
+## Caddyfile
+
+Caddy's routing configuration. Defines how incoming requests are routed to backend services.
+
+```
+:80 {                              # Listen on port 80 (HTTP)
+
+    handle /api/* {                # If URL starts with /api/
+        uri strip_prefix /api      # Remove /api from the path
+        reverse_proxy localhost:3000  # Forward to ai-toolbox
+    }
+    # /api/health → strips /api → sends /health to localhost:3000
+
+    handle /workflow/* {           # If URL starts with /workflow/
+        uri strip_prefix /workflow # Remove /workflow from the path
+        reverse_proxy localhost:5678  # Forward to n8n
+    }
+    # /workflow/login → strips /workflow → sends /login to localhost:5678
+
+    handle /health {               # Exact match /health
+        respond "ok" 200           # Caddy replies directly (no forwarding)
+    }
+
+    handle {                       # Catch-all (everything else)
+        respond "app-server" 200
+    }
+}
+```
+
+| Directive | Meaning |
+|-----------|---------|
+| `:80` | Listen on port 80 |
+| `handle /path/*` | Match URLs starting with /path/ |
+| `uri strip_prefix /path` | Remove /path from the URL before forwarding |
+| `reverse_proxy localhost:3000` | Forward the request to a backend service |
+| `respond "text" 200` | Caddy replies directly without forwarding |
+
+### Validating a Caddyfile
+
+```bash
+docker run --rm -v ./Caddyfile:/etc/caddy/Caddyfile caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
+```
+
+Run locally before deploying to catch syntax errors.
+
 ## docker-compose run
 
 `docker-compose run` creates a **one-off** container from a service to run a specific command, instead of the default startup command.
