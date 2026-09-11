@@ -191,7 +191,31 @@ Public IP: 129.154.52.73
 
 ---
 
-## CIDR Notation Cheat Sheet
+## CIDR Notation
+
+CIDR (Classless Inter-Domain Routing) is a way to express IP ranges. Format: `IP/bits`.
+
+- The IP is the starting address
+- The `/bits` number says how many bits of the IP are **fixed**. The rest are free to vary.
+- More fixed bits = fewer IPs in the range
+
+```
+0.0.0.0/0   → 0 bits fixed  → ALL IPs match (the entire internet)
+10.0.0.0/16 → 16 bits fixed → 10.0.x.x range (65,536 IPs)
+10.0.0.0/24 → 24 bits fixed → 10.0.0.x range (256 IPs)
+49.36.120.5/32 → 32 bits fixed → exactly one IP
+```
+
+### Common CIDRs and what they mean
+
+| CIDR | Who matches | Use |
+|------|-------------|-----|
+| `0.0.0.0/0` | Anyone on the internet | Security list: allow public access |
+| `10.0.0.0/16` | 10.0.0.0 – 10.0.255.255 (65,536 IPs) | VCN range |
+| `10.0.0.0/24` | 10.0.0.0 – 10.0.0.255 (256 IPs) | Subnet range |
+| `49.36.120.5/32` | Only 49.36.120.5 (1 IP) | Restrict access to your IP only |
+
+### Cheat sheet
 
 | CIDR | IPs | Mask | Use |
 |------|-----|------|-----|
@@ -199,6 +223,8 @@ Public IP: 129.154.52.73
 | `/24` | 256 (254 usable) | 255.255.255.0 | Subnet level |
 | `/32` | 1 | 255.255.255.255 | Single host |
 | `0.0.0.0/0` | All IPs | — | "Anywhere" (used in security list rules) |
+
+For a web server, `0.0.0.0/0` is correct — you want anyone to reach your site. For an admin panel, you might use your specific IP (`/32`) to lock it down.
 
 ---
 
