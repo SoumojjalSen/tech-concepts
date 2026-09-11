@@ -883,6 +883,36 @@ Caddy's routing configuration. Defines how incoming requests are routed to backe
 | `reverse_proxy localhost:3000` | Forward the request to a backend service |
 | `respond "text" 200` | Caddy replies directly without forwarding |
 
+### Why strip_prefix?
+
+The prefix (e.g. `/ai-toolbox`) is Caddy's routing concern — the backend service doesn't know about it. Without stripping, the backend receives a path it doesn't recognize.
+
+```
+Without strip_prefix:
+  Browser: /ai-toolbox/health
+  Caddy forwards: /ai-toolbox/health → ai-toolbox
+  ai-toolbox: "no route /ai-toolbox/health" → 404
+
+With strip_prefix:
+  Browser: /ai-toolbox/health
+  Caddy strips /ai-toolbox → forwards: /health → ai-toolbox
+  ai-toolbox: "I know /health" → 200 ok
+```
+
+This is standard practice in every reverse proxy (nginx does the same with `proxy_pass` trailing slash). The backend code stays clean — it defines `/health`, `/ai`, `/mcp/:server/:tool` without knowing what prefix Caddy puts in front.
+
+### External vs internal access
+
+```
+From internet (through Caddy):
+  http://server-ip/ai-toolbox/health → Caddy → strip prefix → localhost:3000/health
+
+From inside VM (direct, no Caddy):
+  http://localhost:3000/health → ai-toolbox directly
+```
+
+Services on the same VM talk to each other via `localhost` directly — they don't go through Caddy. Only external traffic from the internet goes through Caddy.
+
 ### Validating a Caddyfile
 
 ```bash
