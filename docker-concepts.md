@@ -1110,3 +1110,158 @@ curl -s -X PUT http://localhost:5678/api/v1/workflows/<id> \
 ```
 
 **Read-only fields** that must be removed from PUT requests: `id`, `active`, `createdAt`, `updatedAt`, `versionId`, `activeVersionId`, `isArchived`, `triggerCount`. Sending them returns `400 request/body/<field> is read-only`.
+
+## Deployment Issues — Real-World Examples
+
+Problems we hit deploying to an Oracle Cloud VM, and what each one teaches.
+
+### SPA (Single Page Application) behind a reverse proxy
+
+An SPA is a web app where the server returns **one HTML file** and JavaScript renders the entire page. Examples: React, Vue, Angular, n8n.
+
+The HTML references assets that the browser fetches as **separate requests**:
+
+```html
+<script src="/assets/app.js"></script>
+<link href="/assets/style.css">
+```
+
+**The problem with a path prefix:**
+
+If you serve an SPA at `/workflow/` behind a reverse proxy:
+
+```
+1. Browser: GET /workflow/           → Caddy forwards to n8n → returns HTML ✅
+2. HTML says: <script src="/assets/app.js">
+3. Browser: GET /assets/app.js       → goes to ROOT, not /workflow/ → Caddy catch-all → 404 ❌
+```
+
+The initial page loads, but every asset request goes to the **root path** because the HTML uses absolute paths (`/assets/...`). The reverse proxy's `strip_prefix` only handled the first request — the browser makes the asset requests independently.
+
+**Why strip_prefix doesn't fix it:**
+
+`strip_prefix` processes requests **arriving at Caddy**. But the browser doesn't add the prefix to asset URLs — it reads `/assets/app.js` from the HTML and requests exactly that. Caddy never sees `/workflow/assets/app.js`, so there's nothing to strip.
+
+```
+What you expect:
+  Browser → /workflow/assets/app.js → Caddy strips /workflow → /assets/app.js → n8n ✅
+
+What actually happens:
+  Browser → /assets/app.js → Caddy catch-all → "app-server" text → blank page ❌
+```
+
+**Fix options:**
+
+| Option | How | When to use |
+|--------|-----|-------------|
+| App knows its prefix | React: `homepage` in package.json. Next.js: `basePath`. Vue: `base` in router. App rewrites all asset URLs **and** serves assets at the prefixed path. | App properly supports base paths |
+| Separate port/subdomain | Serve the SPA on its own port (`:8080`) or subdomain (`workflow.domain.com`). No prefix, no mismatch. | App doesn't support base paths (n8n's `N8N_PATH` is broken) |
+
+**The rule:**
+
+| App type | Path prefix (`strip_prefix`) | Separate port/subdomain |
+|----------|------------------------------|------------------------|
+| API (JSON only) | Works — no assets to load | Works |
+| SPA (HTML + JS + CSS) | Only if the app fully supports base paths | Always works |
+
+### Secure cookies over HTTP
+
+Browsers refuse to set cookies marked `Secure` when the connection is plain HTTP (not HTTPS). The cookie is silently dropped — no error in the network tab, just a broken login.
+
+**What happened:** n8n marks its session cookie as `Secure` by default. Accessing `http://140.238.229.137:8080` (no HTTPS) → browser drops the cookie → login fails → "secure cookie" error page.
+
+**Fixes:**
+
+| Fix | How | When |
+|-----|-----|------|
+| Add HTTPS | Get a domain + let Caddy auto-generate TLS certs | Production |
+| `N8N_SECURE_COOKIE=false` | Env var tells n8n to issue non-Secure cookies | Development / testing over HTTP |
+
+```yaml
+# docker-compose.yml
+environment:
+  - N8N_SECURE_COOKIE=false  # temporary — remove when HTTPS is added
+```
+
+### CDN caching in CI/CD
+
+`raw.githubusercontent.com` caches files for approximately **5 minutes**. If your deploy script downloads config files from this URL, it may get the **old** version immediately after a push.
+
+**The trap:**
+
+```
+1. You push a change (e.g. add N8N_SECURE_COOKIE=false)
+2. GitHub Actions triggers deploy within seconds
+3. Deploy script: curl https://raw.githubusercontent.com/.../docker-compose.yml
+4. CDN returns the CACHED (old) version — your change isn't in it
+5. VM runs stale config, env var missing, login still broken
+6. You check the repo — file looks correct — nothing makes sense
+```
+
+**Attempted fixes:**
+
+- `?t=$(date +%s)` cache-busting query param — unreliable, CDN sometimes ignores it
+- Manually SSH in and write files — works but defeats automation
+
+**Proper fix:** SCP files directly from the CI runner to the VM. The runner already has your repo checked out via `actions/checkout` — no CDN involved.
+
+```
+Before (fragile):
+  push → GitHub CDN (cached ~5min) → curl on VM → may get stale file
+
+After (reliable):
+  push → checkout on CI runner → SCP to VM → always latest
+```
+
+### Docker creates directory for missing mount source
+
+When you bind-mount a **file** that doesn't exist on the host, Docker creates a **directory** with that name instead of failing.
+
+```yaml
+volumes:
+  - ./Caddyfile:/etc/caddy/Caddyfile  # if Caddyfile doesn't exist on host...
+```
+
+**The cascade:**
+
+```
+1. docker-compose up — Caddyfile doesn't exist on VM
+2. Docker creates DIRECTORY ~/apps/server-config/Caddyfile/
+3. Caddy tries to read config from a directory → fails
+4. Next deploy: curl tries to download Caddyfile → can't overwrite a directory with a file → silent failure
+5. Caddyfile stays a directory, Caddy keeps failing
+```
+
+**Prevention:** ensure mount source files exist on the host **before** running `docker-compose up`. In CI, the file-copy step (SCP or curl) must happen before `docker-compose up -d`.
+
+### SCP in GitHub Actions
+
+`appleboy/scp-action` copies files from the CI runner directly to the server over SSH. The runner already has your repo checked out, so files are always the latest version — no CDN.
+
+```yaml
+steps:
+  - uses: actions/checkout@v4  # repo files now on the runner
+
+  # Step 1: copy config files to VM
+  - uses: appleboy/scp-action@v0.1.7
+    with:
+      host: ${{ secrets.VM_HOST }}
+      username: ${{ secrets.VM_USER }}
+      key: ${{ secrets.SSH_PRIVATE_KEY }}
+      source: "docker-compose.yml,Caddyfile"
+      target: ~/apps/server-config
+
+  # Step 2: restart services
+  - uses: appleboy/ssh-action@v1
+    with:
+      host: ${{ secrets.VM_HOST }}
+      username: ${{ secrets.VM_USER }}
+      key: ${{ secrets.SSH_PRIVATE_KEY }}
+      script: |
+        cd ~/apps/server-config
+        docker-compose down --remove-orphans || true
+        docker-compose pull
+        docker-compose up -d
+```
+
+Two-step pattern: SCP the files, then SSH to restart. Files always match what's in the repo at the commit that triggered the workflow.
